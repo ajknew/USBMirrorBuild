@@ -1,0 +1,61 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'usb-screen-mirror-project.zip'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Extract project
+        run: |
+          mkdir project
+          unzip usb-screen-mirror-project.zip -d project
+          find project -maxdepth 3 -type f | head -80
+
+      - name: Locate Gradle project
+        run: |
+          find project -name settings.gradle.kts -o -name settings.gradle
+
+      - name: Build APK
+        run: |
+          PROJECT_DIR=$(dirname "$(find project -name settings.gradle.kts -o -name settings.gradle | head -1)")
+          if [ -z "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+            echo "Gradle project or app/build.gradle.kts not found"
+            exit 1
+          fi
+          cd "$PROJECT_DIR"
+          gradle assembleDebug --stacktrace
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: USBMirror-debug-APK
+          path: project/**/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
