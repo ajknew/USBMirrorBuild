@@ -1,8 +1,10 @@
-name: Build Android APK
+name: Build USB Screen Mirror APK
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
       - 'usb-screen-mirror-project.zip'
       - '.github/workflows/build.yml'
@@ -12,152 +14,121 @@ permissions:
 
 jobs:
   build:
-    name: Build USB Screen Mirror
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java
-        uses: actions/setup-java@v5
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
-      - name: Extract Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ ! -f "$GITHUB_WORKSPACE/usb-screen-mirror-project.zip" ]; then
-            echo "::error::usb-screen-mirror-project.zip not found"
-            exit 1
-          fi
-
-          mkdir -p "$GITHUB_WORKSPACE/project"
-
-          unzip -q "$GITHUB_WORKSPACE/usb-screen-mirror-project.zip" \
-            -d "$GITHUB_WORKSPACE/project"
-
-          echo "=== Extracted files ==="
-          find "$GITHUB_WORKSPACE/project" -maxdepth 4 -type f | head -100
-
-      - name: Locate Gradle project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROOT="$GITHUB_WORKSPACE/project"
-          SETTINGS_FILE=""
-
-          SETTINGS_FILE=$(find "$ROOT" -type f -name settings.gradle -print -quit)
-
-          if [ -z "$SETTINGS_FILE" ]; then
-            SETTINGS_FILE=$(find "$ROOT" -type f -name settings.gradle.kts -print -quit)
-          fi
-
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "::error::Gradle settings file not found"
-            echo "=== Available project files ==="
-            find "$ROOT" -maxdepth 6 -type f
-            exit 1
-          fi
-
-          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
-
-          echo "=== Gradle project directory ==="
-          echo "$PROJECT_DIR"
-
-          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
-            echo "::error::Gradle wrapper gradlew not found"
-            echo "=== Searching for Gradle wrapper ==="
-            find "$ROOT" -type f -name gradlew
-            exit 1
-          fi
-
-          chmod +x "$PROJECT_DIR/gradlew"
-
-          if [ ! -f "$PROJECT_DIR/app/build.gradle" ] && \
-             [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-            echo "::error::App Gradle build file not found"
-            find "$PROJECT_DIR" -maxdepth 4 -type f
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK packages
-        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+          yes | sdkmanager --licenses || true
+
+      - name: Extract Android project
         run: |
           set -euo pipefail
 
-          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
-            -type f -name sdkmanager -print -quit)
+          test -f usb-screen-mirror-project.zip
 
-          if [ -z "$SDKMANAGER" ]; then
-            echo "::error::Android SDK manager not found"
+          mkdir -p project
+          unzip -o usb-screen-mirror-project.zip -d project
+
+          echo "=== Project files ==="
+          find project -maxdepth 4 -type f | head -100
+
+      - name: Locate Gradle project
+        id: locate
+        run: |
+          set -euo pipefail
+
+          SETTINGS="$(find project \
+            -type f \
+            \( -name settings.gradle.kts -o -name settings.gradle \) \
+            -print -quit)"
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: settings.gradle(.kts) not found"
             exit 1
           fi
 
-          echo "=== SDK Manager ==="
-          echo "$SDKMANAGER"
+          PROJECT_DIR="$(dirname "$SETTINGS")"
 
-          "$SDKMANAGER" --install \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
+          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] &&
+             [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+            echo "ERROR: app/build.gradle(.kts) not found"
+            exit 1
+          fi
 
-      - name: Check Java and Gradle
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          echo "=== Java ==="
-          java -version
-
-          echo "=== Gradle wrapper ==="
-          ./gradlew --version
+          echo "Project directory: $PROJECT_DIR"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Build debug APK
-        shell: bash
+        working-directory: .
+        env:
+          PROJECT_DIR: ${{ steps.locate.outputs.project_dir }}
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          ./gradlew \
+          echo "=== Gradle project directory ==="
+          pwd
+
+          echo "=== Gradle version ==="
+          gradle --version
+
+          echo "=== Building APK ==="
+          gradle \
             --no-daemon \
             --stacktrace \
             assembleDebug
 
       - name: Verify APK
-        shell: bash
+        id: verify
+        env:
+          PROJECT_DIR: ${{ steps.locate.outputs.project_dir }}
         run: |
           set -euo pipefail
 
-          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk/debug" \
+            -maxdepth 1 \
+            -type f \
+            -name '*.apk' \
+            -print -quit)"
 
-          if [ ! -f "$APK" ]; then
-            echo "::error::APK file not found"
-            echo "=== Searching generated APK files ==="
-            find "$PROJECT_DIR" -type f -name '*.apk'
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated"
+            find "$PROJECT_DIR/app/build" -maxdepth 6 -type f || true
             exit 1
           fi
 
-          echo "=== APK BUILD SUCCESS ==="
+          echo "APK_PATH=$APK"
           ls -lh "$APK"
 
-      - name: Upload APK
+          echo "apk_path=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: USBMirror-debug-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ steps.verify.outputs.apk_path }}
           if-no-files-found: error
           retention-days: 7
- 
