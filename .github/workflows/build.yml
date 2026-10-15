@@ -7,51 +7,142 @@ on:
       - 'usb-screen-mirror-project.zip'
       - '.github/workflows/build.yml'
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Build USB Screen Mirror
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
+      # 1. Download source dari repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Setup Java
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
+      # 3. Setup Gradle
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
 
+      # 4. Setup Android SDK
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platforms;android-36
+            build-tools;36.0.0
 
-      - name: Install SDK packages
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
-
-      - name: Extract project
+      # 5. Pastikan file ZIP tersedia
+      - name: Verify project archive
         run: |
-          mkdir project
-          unzip usb-screen-mirror-project.zip -d project
-          find project -maxdepth 3 -type f | head -80
+          set -eu
 
-      - name: Locate Gradle project
-        run: |
-          find project -name settings.gradle.kts -o -name settings.gradle
-
-      - name: Build APK
-        run: |
-          PROJECT_DIR=$(dirname "$(find project -name settings.gradle.kts -o -name settings.gradle | head -1)")
-          if [ -z "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-            echo "Gradle project or app/build.gradle.kts not found"
+          if [ ! -f usb-screen-mirror-project.zip ]; then
+            echo "ERROR: usb-screen-mirror-project.zip tidak ditemukan."
+            echo "File di root repository:"
+            ls -la
             exit 1
           fi
+
+          echo "ZIP ditemukan:"
+          ls -lh usb-screen-mirror-project.zip
+
+          echo "Memeriksa isi arsip..."
+          unzip -t usb-screen-mirror-project.zip
+
+      # 6. Extract source project
+      - name: Extract project
+        run: |
+          set -eu
+
+          mkdir -p project
+          unzip -q usb-screen-mirror-project.zip -d project
+
+          echo "Isi project:"
+          find project -maxdepth 3 -type f | head -100
+
+      # 7. Cari lokasi proyek Gradle
+      - name: Locate Gradle project
+        id: locate
+        shell: bash
+        run: |
+          set -eu
+
+          SETTINGS_FILE=$(find project \
+            -type f \
+            \( -name settings.gradle.kts -o -name settings.gradle \) \
+            -print -quit)
+
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: settings.gradle(.kts) tidak ditemukan."
+            echo "Struktur hasil ekstraksi:"
+            find project -maxdepth 5 -type f | head -200
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+
+          echo "Gradle project: $PROJECT_DIR"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] \
+             && [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+            echo "ERROR: file konfigurasi Gradle modul app tidak ditemukan."
+            find "$PROJECT_DIR" -maxdepth 3 -type f | head -100
+            exit 1
+          fi
+
+      # 8. Build APK debug
+      - name: Build Debug APK
+        working-directory: .
+        env:
+          PROJECT_DIR: ${{ steps.locate.outputs.project_dir }}
+        run: |
+          set -eu
+
           cd "$PROJECT_DIR"
+
+          echo "Memulai build APK..."
+          echo "Lokasi proyek: $(pwd)"
+          java -version
+          gradle --version
+
           gradle assembleDebug --stacktrace
 
+      # 9. Periksa hasil build
+      - name: Verify APK
+        if: success()
+        env:
+          PROJECT_DIR: ${{ steps.locate.outputs.project_dir }}
+        run: |
+          set -eu
+
+          APK_DIR="$PROJECT_DIR/app/build/outputs/apk/debug"
+
+          if [ ! -d "$APK_DIR" ]; then
+            echo "ERROR: folder APK tidak ditemukan."
+            find "$PROJECT_DIR/app/build/outputs" -maxdepth 5 -type f || true
+            exit 1
+          fi
+
+          find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' -print
+
+          if ! find "$APK_DIR" -maxdepth 1 -type f -name '*.apk' | grep -q .; then
+            echo "ERROR: APK tidak berhasil dihasilkan."
+            exit 1
+          fi
+
+      # 10. Upload APK sebagai artifact
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -59,3 +150,4 @@ jobs:
           name: USBMirror-debug-APK
           path: project/**/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 7
